@@ -1,0 +1,224 @@
+# ZPower (zp) — v1.3.0
+
+**Intelligence layer for AI/ML systems.**  
+Works *with* PyTorch and HuggingFace — not against them.
+
+> Stabilize training. Protect good weights. Detect anomalies. Reduce wasted compute.
+
+---
+
+## Install
+
+```bash
+pip install zpower                # numpy only (core features)
+pip install zpower[torch]         # + PyTorch support
+pip install zpower[hf]            # + HuggingFace Transformers
+pip install zpower[full]          # everything
+```
+
+---
+
+## Quick Start
+
+### Mode A — Attach to any existing model
+```python
+import zpower as zp
+
+zp_model = zp.attach(
+    my_model,
+    stabilize    = True,   # GradShield + StabilityCore
+    monitor      = True,   # NipGraph anomaly detection
+    weight_vault = True,   # Record best weight snapshots
+    auto_heal    = True,   # Auto-recover from training failures
+)
+
+output = zp_model(input_tensor)   # Forward pass unchanged
+loss.backward()                   # GradShield hooks active automatically
+```
+
+### Mode B — Training from scratch
+```python
+trainer = zp.Trainer(
+    my_model,
+    stabilize    = True,
+    weight_vault = True,
+    auto_heal    = True,
+    heal_strategy = "both",   # 'both', 'rollback_only', 'lr_only', 'restart'
+)
+trainer.fit(train_loader, epochs=20, lr=1e-3)
+print(trainer.weight_report())
+```
+
+### Multi-model weight selection
+```python
+from zpower.weights import WeightSurgeon
+
+surgeon = WeightSurgeon()
+surgeon.auto_discover("./checkpoints/")   # Scans folder, asks y/N per file
+best = surgeon.select_best()
+new_model.load_state_dict(best)
+```
+
+---
+
+## Module Overview
+
+| Module | Purpose |
+|---|---|
+| `zp.memory.OtuxStore` | Selective 3D-coordinate memory — only stores important info |
+| `zp.stabilize.GradShield` | Gradient health monitor — adaptive per-layer thresholds |
+| `zp.stabilize.StabilityCore` | Loss EMA, plateau detection, LR signal |
+| `zp.stabilize.ModelStabilizer` | Unified stabilization API |
+| `zp.monitor.NipGraph` | Parity-aware training anomaly detection |
+| `zp.weights.WeightVault` | Performance-gated weight snapshots |
+| `zp.weights.WeightSurgeon` | Multi-model best weight selection with auto_discover |
+| `zp.weights.WeightGuard` | EWC-style catastrophic forgetting prevention |
+| `zp.heal.AutoHeal` | Automatic training failure recovery (4 strategies) |
+| `zp.compute.SafeMath` | NaN-safe math with rational number fallback |
+| `zp.compute.safe_loss` | NaN-safe loss computation |
+| `zp.compat.ZPowerModel` | Transparent PyTorch / HuggingFace model wrapper |
+
+---
+
+## Supported Model Types
+
+ZPower is **model-agnostic** — it works on any `torch.nn.Module`:
+
+| Model Type | Examples | How to Use |
+|---|---|---|
+| Text LLMs / SLMs | GPT-2, LLaMA, Mistral, Phi | `zp.attach(model)` or `zp.compat.augment(model)` |
+| Image Models | ResNet, ViT, EfficientNet | `zp.attach(model)` |
+| Audio Models | Whisper, Wav2Vec2 | `zp.attach(model)` |
+| Video Models | VideoMAE, TimeSformer | `zp.attach(model)` |
+| Multimodal | CLIP, LLaVA, BLIP | `zp.attach(model)` |
+| Custom Models | Any `nn.Module` subclass | `zp.attach(model)` |
+| HuggingFace | Any `PreTrainedModel` | `zp.compat.augment(model)` |
+
+ZPower runs as a **side-channel** — it never modifies your model's forward pass, weights, or gradients (except when GradShield clips exploding gradients or AutoHeal rolls back).
+
+---
+
+## v1.3.0 — What's New
+
+### Critical Bug Fixes
+
+1. **Trainer crash on StabilityCore fallback** — `_ema_last()` was called as `self._ema_last()` but it's a module-level function, causing `AttributeError`. Now fixed to `_ema_last(model)`.
+
+2. **AutoHeal docstring said "Reserved for v2"** — AutoHeal has been fully implemented since v1.1. Both `zp.attach()` and `zp.Trainer()` docstrings now correctly describe it.
+
+3. **Memory entries all tagged `step_0`** — Without Trainer, `ZPowerModel._step` was never incremented in `forward()`, so all OtuxStore entries had the same step number. Now incremented correctly.
+
+4. **Test bug: `query_by_coord()` returns dicts** — Test accessed `.token` attribute but the method returns dicts since v1.2. Fixed.
+
+### Smart Features
+
+**Smart Eviction (OtuxStore)** — `_evict()` was O(N) scanning all entries. Now uses a min-heap for O(log N) eviction. The lowest-scored entry is always at the top of the heap.
+
+**Adaptive Warmup (GradShield)** — Previously used a fixed 20-step warmup before activating adaptive thresholds. Now uses variance-based confidence: exits warmup when per-layer gradient statistics are stable. Prevents premature thresholds on layers with few observations.
+
+**Multiple Heal Strategies (AutoHeal)** — New `strategy` parameter:
+```python
+# Default: rollback + LR cut (v1.1/v1.2 behaviour)
+healer = AutoHeal(model, vault, optimizer, strategy="both")
+
+# Only rollback weights, keep current LR
+healer = AutoHeal(model, vault, optimizer, strategy="rollback_only")
+
+# Only reduce LR, no weight rollback
+healer = AutoHeal(model, vault, optimizer, strategy="lr_only")
+
+# Full restart: rollback + LR cut + reset optimizer momentum
+healer = AutoHeal(model, vault, optimizer, strategy="restart")
+```
+
+**Overhead Tracking** — ZPower now measures its own overhead:
+```python
+zp_model = zp.attach(my_model)
+# ... training ...
+print(f"ZPower overhead: {zp_model.overhead_per_call_ms():.3f}ms/call")
+zp_model.pprint_status()  # Formatted dashboard
+```
+
+### Security & Robustness
+
+- `ZPConfig.validate()` uses `ValueError` instead of `assert` (assert can be disabled with `-O`)
+- `ZPConfig.validate()` now validates ALL 27 fields (was only 4)
+- `WeightSurgeon` logs WARNING when falling back to `weights_only=False`
+- `GradShield._remove_hooks()` catches `RuntimeError` for already-removed hooks
+- `WeightVault.load()` validates file existence before loading
+- `OtuxStore` constructor validates `dim`, `max_entries`, threshold ordering
+- `SafeMath` constructor validates `pocket_capacity`
+- `zplog.set_level()` validates input level
+
+### Developer Experience
+
+- **`__repr__` on all classes** — Every major class now has a useful `__repr__` for debugging
+- **`AutoHeal.reset()`** — Clear heal state for reuse between training runs
+- **`WeightVault.get_snapshot_metrics()`** — Retrieve stored metrics (loss, accuracy, etc.) per layer
+- **`WeightVault.save()` now persists metrics** — Metrics were lost on save/load, now preserved
+- **`ZPowerModel.pprint_status()`** — Formatted console output of all component status
+- **`OtuxStore._prep()` clearer errors** — Non-numeric input and zero-norm vectors explain the problem
+- **`NipGraph.VarState.history` is `deque`** — O(1) trim instead of O(N) `list.pop(0)`
+
+---
+
+## Release Notes
+
+---
+
+## v1.2.0 — May 2026
+
+**Theme: Critical Bug Fixes + Security + Performance**
+
+3 critical bugs that silently broke core functionality were fixed. 5 high-priority correctness issues resolved. 3 performance upgrades. 1 new feature (WeightSurgeon.auto_discover).
+
+### Critical Bug Fixes
+
+- **ZPowerModel.parameters() returned empty iterator** — optimizer never trained model
+- **StabilityCore plateau detection compared incompatible values** — EMA vs raw loss
+- **write_batch() overwrote the wrong entry result** — buf_result_idx tracking fix
+
+### Performance Upgrades
+
+| Component | Change | Impact |
+|---|---|---|
+| `OtuxStore.query()` | `np.argsort` to `np.argpartition` | O(N log N) to O(N) |
+| `GradShield.status()` | Full history scan to running counters | O(N) to O(1) |
+| `StabilityCore._history` | `list + manual trim` to `deque(maxlen)` | O(N) to O(1) |
+| `SafeMath` pocket | `dict` to `OrderedDict` | O(N) to O(1) LRU |
+
+---
+
+## v1.1.0 — May 2026
+
+**Theme: Performance + AutoHeal + Adaptive Thresholds**
+
+- AutoHeal Engine: automatic training failure recovery
+- OTUX-S Memory: 100x faster writes, write_batch()
+- GradShield: adaptive per-layer thresholds via Welford algorithm
+
+---
+
+## v1.0.0 — May 2026
+
+**Initial release.** Seven core modules published.
+
+---
+
+## Research Origins
+
+Original research by **NNN Bhoi**:
+
+| System | Origin |
+|---|---|
+| **OTUX-S** | PERATHINK research paper — selective 3D coordinate memory |
+| **NipGraph** | NipGraph research paper — parity-aware state tracking |
+| **GradShield + StabilityCore** | MUSAI vGPU engine — M2 + M4 modules |
+| **WeightVault / Surgeon / Guard** | ZPower original research |
+| **AutoHeal** | ZPower original research |
+
+---
+
+## License
+
+MIT — free to use in any project.
